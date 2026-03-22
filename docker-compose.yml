@@ -1,0 +1,41 @@
+services:
+  event-service:
+    build: ./services/event-service
+    environment:
+      PORT: "3001"
+      MONGODB_URI: ${EVENT_SERVICE_MONGODB_URI:?Set EVENT_SERVICE_MONGODB_URI in .env}
+    ports:
+      - "3001:3001"
+
+  booking-service:
+    build: ./services/booking-service
+    environment:
+      PORT: "3002"
+      EVENT_SERVICE_URL: http://event-service:3001
+      MONGODB_URI: ${BOOKING_SERVICE_MONGODB_URI:?Set BOOKING_SERVICE_MONGODB_URI in .env}
+    depends_on:
+      - event-service
+    ports:
+      - "3002:3002"
+
+  api-gateway:
+    build: ./services/api-gateway
+    environment:
+      PORT: "8080"
+      EVENT_SERVICE_URL: http://event-service:3001
+      BOOKING_SERVICE_URL: http://booking-service:3002
+    depends_on:
+      - event-service
+      - booking-service
+    ports:
+      - "8080:8080"
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE: ""
+    depends_on:
+      - api-gateway
+    ports:
+      - "80:80"

@@ -1,0 +1,69 @@
+# Build and push images to Amazon ECR. Optional ECS rolling deploy.
+#
+# Secrets: AWS_REGION, ECR_REGISTRY, and either (AWS_ROLE_ARN for OIDC) or
+# (AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY). Optional: ECR_REPOSITORY_PREFIX (default ctse).
+# For ECS update: ECS_CLUSTER, ECS_SERVICE_FRONTEND — enable the last step when ready.
+
+name: Deploy AWS
+
+on:
+  workflow_dispatch:
+    inputs:
+      auth:
+        description: "AWS auth method"
+        type: choice
+        options:
+          - access-keys
+          - oidc
+        default: access-keys
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  push-ecr:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        if: github.event.inputs.auth == 'oidc'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Configure AWS credentials (access keys)
+        if: github.event.inputs.auth == 'access-keys'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push images
+        env:
+          REGISTRY: ${{ secrets.ECR_REGISTRY }}
+          PREFIX: ${{ secrets.ECR_REPOSITORY_PREFIX }}
+          TAG: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          PREFIX="${PREFIX:-ctse}"
+          for pair in "event-service:services/event-service" "booking-service:services/booking-service" "api-gateway:services/api-gateway" "frontend:frontend"; do
+            name="${pair%%:*}"
+            ctx="${pair#*:}"
+            img="$REGISTRY/$PREFIX-$name"
+            docker build -t "$img:$TAG" -t "$img:latest" "$ctx"
+            docker push "$img:$TAG"
+            docker push "$img:latest"
+          done
+
+      # Uncomment when ECS cluster and service exist:
+      # - name: ECS force new deployment
+      #   env:
+      #     CLUSTER: ${{ secrets.ECS_CLUSTER }}
+      #     SERVICE: ${{ secrets.ECS_SERVICE_FRONTEND }}
+      #   run: aws ecs update-service --cluster "$CLUSTER" --service "$SERVICE" --force-new-deployment
