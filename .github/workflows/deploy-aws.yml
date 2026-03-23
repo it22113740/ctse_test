@@ -1,53 +1,63 @@
-# Build and push images to Amazon ECR. Optional ECS rolling deploy.
+# Build and push images to Docker Hub, then force ECS rollout.
 #
-# Secrets: AWS_REGION, ECR_REGISTRY, and either (AWS_ROLE_ARN for OIDC) or
-# (AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY). Optional: ECR_REPOSITORY_PREFIX (default ctse).
-# For ECS update: ECS_CLUSTER, ECS_SERVICE_FRONTEND — enable the last step when ready.
+# Required secrets:
+# - DOCKERHUB_USERNAME
+# - DOCKERHUB_TOKEN
+# - AWS_REGION
+# - ECS_CLUSTER
+# - ECS_SERVICE_EVENT
+# - ECS_SERVICE_BOOKING
+# - ECS_SERVICE_GATEWAY
+# - ECS_SERVICE_FRONTEND
+# and either:
+# - AWS_ROLE_ARN (OIDC), or
+# - AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY
+#
+# Optional secret:
+# - DOCKERHUB_REPOSITORY_PREFIX (default: ctse)
 
-name: Deploy AWS
+name: Deploy DockerHub + ECS
 
 on:
+  push:
+    branches: [main, master]
   workflow_dispatch:
-    inputs:
-      auth:
-        description: "AWS auth method"
-        type: choice
-        options:
-          - access-keys
-          - oidc
-        default: access-keys
 
 permissions:
   id-token: write
   contents: read
 
 jobs:
-  push-ecr:
+  push-dockerhub:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - name: Configure AWS credentials (OIDC)
-        if: github.event.inputs.auth == 'oidc'
+        if: ${{ secrets.AWS_ROLE_ARN != '' }}
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Configure AWS credentials (access keys)
-        if: github.event.inputs.auth == 'access-keys'
+        if: ${{ secrets.AWS_ROLE_ARN == '' }}
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - uses: aws-actions/amazon-ecr-login@v2
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build and push images
         env:
-          REGISTRY: ${{ secrets.ECR_REGISTRY }}
-          PREFIX: ${{ secrets.ECR_REPOSITORY_PREFIX }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          PREFIX: ${{ secrets.DOCKERHUB_REPOSITORY_PREFIX }}
           TAG: ${{ github.sha }}
         run: |
           set -euo pipefail
@@ -55,15 +65,22 @@ jobs:
           for pair in "event-service:services/event-service" "booking-service:services/booking-service" "api-gateway:services/api-gateway" "frontend:frontend"; do
             name="${pair%%:*}"
             ctx="${pair#*:}"
-            img="$REGISTRY/$PREFIX-$name"
+            img="$DOCKERHUB_USERNAME/$PREFIX-$name"
             docker build -t "$img:$TAG" -t "$img:latest" "$ctx"
             docker push "$img:$TAG"
             docker push "$img:latest"
           done
 
-      # Uncomment when ECS cluster and service exist:
-      # - name: ECS force new deployment
-      #   env:
-      #     CLUSTER: ${{ secrets.ECS_CLUSTER }}
-      #     SERVICE: ${{ secrets.ECS_SERVICE_FRONTEND }}
-      #   run: aws ecs update-service --cluster "$CLUSTER" --service "$SERVICE" --force-new-deployment
+      - name: ECS force new deployment
+        env:
+          CLUSTER: ${{ secrets.ECS_CLUSTER }}
+          SERVICE_EVENT: ${{ secrets.ECS_SERVICE_EVENT }}
+          SERVICE_BOOKING: ${{ secrets.ECS_SERVICE_BOOKING }}
+          SERVICE_GATEWAY: ${{ secrets.ECS_SERVICE_GATEWAY }}
+          SERVICE_FRONTEND: ${{ secrets.ECS_SERVICE_FRONTEND }}
+        run: |
+          set -euo pipefail
+          aws ecs update-service --cluster "$CLUSTER" --service "$SERVICE_EVENT" --force-new-deployment
+          aws ecs update-service --cluster "$CLUSTER" --service "$SERVICE_BOOKING" --force-new-deployment
+          aws ecs update-service --cluster "$CLUSTER" --service "$SERVICE_GATEWAY" --force-new-deployment
+          aws ecs update-service --cluster "$CLUSTER" --service "$SERVICE_FRONTEND" --force-new-deployment
